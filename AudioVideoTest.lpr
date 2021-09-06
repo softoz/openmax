@@ -220,6 +220,7 @@ begin
         end
         else if id = 'data' then
         begin
+          AudioStream.Size := s; // preset size of stream for faster loading
           AudioStream.CopyFrom(f, s);  // copy data to audio stream
           Log('Audio Stream is ' + AudioStream.Size.ToString + ' bytes long.');
         end
@@ -598,9 +599,6 @@ begin
   WaitForSDDrive;
   Log2('SD Drive ready.');
 
-  IPAddress := WaitForIPComplete;
-  Log3('Network ready. Local Address : ' + IPAddress + '.');
-
   SetOnMsg(@Msg2);
 
   // Init BCM Host
@@ -612,6 +610,9 @@ begin
 
   // Start audio thread (Video thread starts immediately)
   AudioThread.Start;
+
+  IPAddress := WaitForIPComplete;
+  Log3('Network ready. Local Address : ' + IPAddress + '.');
 
   Log('Halted.');
   ThreadHalt(0);
