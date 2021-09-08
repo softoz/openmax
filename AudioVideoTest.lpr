@@ -52,30 +52,40 @@ var
 type
   // Audio and Video thread classes
   TAudioThread = class(TThread)
+  private
+    FFilename: String;
+    FRepeat: Boolean;
   public
-    constructor Create(const filename: string);
+    constructor Create(const AFilename: String; ARepeat: Boolean);
     procedure Execute; override;
   end;
 
   TVideoThread = class(TThread)
+  private
+    FFilename: String;
+    FRepeat: Boolean;
   public
+    constructor Create(const AFilename: String; ARepeat: Boolean);
     procedure Execute; override;
   end;
 
 // Forward declarations for thread classes
-procedure OpenFile(fn: string); forward;
-procedure PlayFile(dn: string); forward;
-function PlayVideo(const filename: string): integer; forward;
+procedure OpenFile(const AFilename: String); forward;
+procedure PlayFile(const ADestination: string; ARepeat: Boolean); forward;
+function PlayVideo(const AFilename: String; ARepeat: Boolean): integer; forward;
 
-constructor TAudioThread.Create(const filename: string);
+constructor TAudioThread.Create(const AFilename: String; ARepeat: Boolean);
 begin
   inherited Create(True); // Create suspended, call Start to begin playback
+
+  FFilename := AFilename;
+  FRepeat := ARepeat;
 
   // Create stream
   AudioStream := TMemoryStream.Create;
 
-  // Load audio file
-  OpenFile(filename);
+  // Open audio file
+  OpenFile(FFilename);
 end;
 
 procedure TAudioThread.Execute;
@@ -83,10 +93,21 @@ begin
   ThreadSetName(ThreadGetCurrent, 'Audio Thread');
 
   // Play audio file
-  PlayFile('hdmi');
+  PlayFile('hdmi', FRepeat);
 
   // Free stream
   AudioStream.Free;
+end;
+
+constructor TVideoThread.Create(const AFilename: String; ARepeat: Boolean);
+begin
+  inherited Create(True);
+
+  FFilename := AFilename;
+  FRepeat := ARepeat;
+
+  // Start thread
+  Start;
 end;
 
 procedure TVideoThread.Execute;
@@ -94,7 +115,7 @@ begin
   ThreadSetName(ThreadGetCurrent, 'Video Thread');
 
   // Play video file
-  PlayVideo('C:\test.h264');
+  PlayVideo(FFilename, FRepeat);
 end;
 
 var
@@ -183,7 +204,7 @@ begin
     end;
 end;
 
-procedure OpenFile(fn: string);
+procedure OpenFile(const AFilename: String);
 var
   f: TFileStream;
   id: string;
@@ -192,8 +213,8 @@ var
 begin
   AudioStream.Clear;
   try
-    Log('Opening file ' + fn);
-    f := TFileStream.Create(fn, fmOpenRead);
+    Log('Opening file ' + AFilename);
+    f := TFileStream.Create(AFilename, fmOpenRead);
     f.Seek(0, soFromBeginning);
     while f.Position + 8 <= f.Size do
     begin
@@ -231,7 +252,7 @@ begin
     f.Free;
   except
     on e: Exception do
-      Log('Error opening "' + fn + '". ' + e.Message);
+      Log('Error opening "' + AFilename + '". ' + e.Message);
   end;
 end;
 
@@ -261,7 +282,7 @@ begin
   Log(ComponentName(comp) + ' Error : ' + OMX_ErrToStr(Data));
 end;
 
-function read_into_buffer_and_empty(comp: PCOMPONENT_T; buff: POMX_BUFFERHEADERTYPE): OMX_ERRORTYPE;
+function read_into_buffer_and_empty(comp: PCOMPONENT_T; buff: POMX_BUFFERHEADERTYPE; loop: Boolean): OMX_ERRORTYPE;
 var
   buff_size: integer;
   Read: integer;
@@ -272,8 +293,15 @@ begin
     Read := buff_size;
   AudioStream.Read(buff.pBuffer^, Read);
   buff.nFilledLen := Read;
+
   if AudioStream.Position = AudioStream.Size then
-    buff.nFlags := buff.nFlags or OMX_BUFFERFLAG_EOS;
+  begin
+    if loop then
+      AudioStream.Position:=0
+    else
+      buff.nFlags := buff.nFlags or OMX_BUFFERFLAG_EOS;
+  end;
+
   Result := OMX_EmptyThisBuffer(ilclient_get_handle(comps[0]), buff);
 end;
 
@@ -289,7 +317,7 @@ begin
     raise Exception.Create(n + ' Failed');
 end;
 
-procedure PlayFile(dn: string);
+procedure PlayFile(const ADestination: string; ARepeat: Boolean);
 var
   res: integer;
   param: OMX_PARAM_PORTDEFINITIONTYPE;
@@ -371,13 +399,13 @@ begin
     dest.nSize := sizeof(OMX_CONFIG_BRCMAUDIODESTINATIONTYPE);
     dest.nVersion.nVersion := OMX_VERSION;
     FillChar(dest.sName, sizeof(dest.sName), 0);
-    dest.sName := dn;
+    dest.sName := ADestination;
     OMXCheck('Set Dest', OMX_SetConfig(ilclient_get_handle(comps[0]), OMX_IndexConfigBrcmAudioDestination, @dest));
     while AudioStream.Position < AudioStream.Size do
     begin
       hdr := ilclient_get_input_buffer(comps[0], 100, 1);
       if hdr <> nil then
-        read_into_buffer_and_empty(comps[0], hdr);
+        read_into_buffer_and_empty(comps[0], hdr, ARepeat);
     end;
 
     while not eos do
@@ -394,7 +422,7 @@ begin
 end;
 
 // Video specific routines
-function PlayVideo(const filename: string): integer;
+function PlayVideo(const AFilename: String; ARepeat: Boolean): integer;
 var
   format: OMX_VIDEO_PARAM_PORTFORMATTYPE;
   cstate: OMX_TIME_CONFIG_CLOCKSTATETYPE;
@@ -423,7 +451,7 @@ begin
   FillChar(tunnel, SizeOf(tunnel), 0);
 
   // Open file
-  infile := FileOpen(filename, fmOpenReadWrite or fmShareDenyNone);
+  infile := FileOpen(AFilename, fmOpenReadWrite or fmShareDenyNone);
   if infile = INVALID_HANDLE_VALUE then
     Exit(-2);
 
@@ -501,6 +529,13 @@ begin
       // Feed data and wait until we get port settings changed
       dest := buf.pBuffer;
       data_len := data_len + FileRead(infile, dest^, buf.nAllocLen - data_len);
+
+      if (data_len = 0) and ARepeat then
+      begin
+        FileSeek(infile, 0, soFromBeginning);
+        data_len := FileRead(infile, dest^, buf.nAllocLen);
+      end;
+
       if (port_settings_changed = 0)
         and (((data_len > 0) and (ilclient_remove_event(video_decode, OMX_EventPortSettingsChanged, 131, 0, 0, 1) = 0))
           or ((data_len = 0) and (ilclient_wait_for_event(video_decode, OMX_EventPortSettingsChanged, 131, 0, 0, 1, ILCLIENT_EVENT_ERROR or ILCLIENT_PARAMETER_CHANGED, 10000) = 0))) then
@@ -543,7 +578,7 @@ begin
       if OMX_EmptyThisBuffer(ilclient_get_handle(video_decode), buf) <> OMX_ErrorNone then
       begin
         status := -6;
-        break;
+        Break;
       end;
 
       buf := ilclient_get_input_buffer(video_decode, 130, 1);
@@ -605,8 +640,8 @@ begin
   BCMHostInit;
 
   // Create Audio and Video threads
-  AudioThread := TAudioThread.Create('c:\a2002011001-e02.wav');
-  VideoThread := TVideoThread.Create(False);
+  AudioThread := TAudioThread.Create('C:\a2002011001-e02.wav', True);
+  VideoThread := TVideoThread.Create('C:\test.h264', True);
 
   // Start audio thread (Video thread starts immediately)
   AudioThread.Start;
