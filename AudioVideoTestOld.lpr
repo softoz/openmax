@@ -1,4 +1,4 @@
-program AudioVideoTest;
+program AudioVideoTestOld;
 
 {$mode delphi}{$H+}
 {$hints off}
@@ -8,18 +8,7 @@ program AudioVideoTest;
 { pjde 2018 / Garry Wood 2021}
 
 uses
-  {$IFDEF RPI}
-  RaspberryPi,
-  {$ENDIF}
-  {$IFDEF RPI2}
-  RaspberryPi2,
-  {$ENDIF}
-  {$IFDEF RPI3}
   RaspberryPi3,
-  {$ENDIF}
-  {$IFDEF RPI4}
-  RaspberryPi4,
-  {$ENDIF}
   GlobalConfig,
   GlobalConst,
   GlobalTypes,
@@ -49,10 +38,7 @@ const
 var
   Console1, Console2, Console3: TWindowHandle;
   IPAddress: string;
-  AudioHandle: THandle;
-  AudioStart: LongWord;
-  AudioSize: LongWord;
-  AudioOffset: LongWord;
+  AudioStream: TMemoryStream;
   ch: char;
   client: PILCLIENT_T;
   Channels: word;
@@ -85,7 +71,7 @@ type
 
 // Forward declarations for thread classes
 procedure OpenFile(const AFilename: String); forward;
-procedure PlayFile(const ADestination, AFilename: string; ARepeat: Boolean); forward;
+procedure PlayFile(const ADestination: string; ARepeat: Boolean); forward;
 function PlayVideo(const AFilename: String; ARepeat: Boolean): integer; forward;
 
 constructor TAudioThread.Create(const AFilename: String; ARepeat: Boolean);
@@ -94,6 +80,9 @@ begin
 
   FFilename := AFilename;
   FRepeat := ARepeat;
+
+  // Create stream
+  AudioStream := TMemoryStream.Create;
 
   // Open audio file
   OpenFile(FFilename);
@@ -104,7 +93,10 @@ begin
   ThreadSetName(ThreadGetCurrent, 'Audio Thread');
 
   // Play audio file
-  PlayFile('hdmi', FFilename, FRepeat);
+  PlayFile('hdmi', FRepeat);
+
+  // Free stream
+  AudioStream.Free;
 end;
 
 constructor TVideoThread.Create(const AFilename: String; ARepeat: Boolean);
@@ -219,10 +211,7 @@ var
   w: word;
   l, s: longword;
 begin
-  AudioHandle := INVALID_HANDLE_VALUE;
-  AudioStart := 0;
-  AudioSize := 0;
-  AudioOffset := 0;
+  AudioStream.Clear;
   try
     Log('Opening file ' + AFilename);
     f := TFileStream.Create(AFilename, fmOpenRead);
@@ -252,12 +241,9 @@ begin
         end
         else if id = 'data' then
         begin
-          // Save start and size of audio data
-          AudioStart := f.Position;
-          AudioSize := s;
-          f.Seek(s, soFromCurrent);
-
-          Log('Audio Data is ' + AudioSize.ToString + ' bytes long.');
+          AudioStream.Size := s; // preset size of stream for faster loading
+          AudioStream.CopyFrom(f, s);  // copy data to audio stream
+          Log('Audio Stream is ' + AudioStream.Size.ToString + ' bytes long.');
         end
         else
           f.Seek(s, soFromCurrent);
@@ -302,19 +288,16 @@ var
   Read: integer;
 begin
   buff_size := buff.nAllocLen;
-  Read := AudioSize - AudioOffset;
+  Read := AudioStream.Size - AudioStream.Position;
   if Read > buff_size then
     Read := buff_size;
-  AudioOffset := AudioOffset + FileRead(AudioHandle, buff.pBuffer^, Read);
+  AudioStream.Read(buff.pBuffer^, Read);
   buff.nFilledLen := Read;
 
-  if AudioOffset = AudioSize then
+  if AudioStream.Position = AudioStream.Size then
   begin
     if loop then
-    begin
-      FileSeek(AudioHandle, AudioStart, soFromBeginning);
-      AudioOffset := AudioStart;
-    end
+      AudioStream.Position:=0
     else
       buff.nFlags := buff.nFlags or OMX_BUFFERFLAG_EOS;
   end;
@@ -334,7 +317,7 @@ begin
     raise Exception.Create(n + ' Failed');
 end;
 
-procedure PlayFile(const ADestination, AFilename: string; ARepeat: Boolean);
+procedure PlayFile(const ADestination: string; ARepeat: Boolean);
 var
   res: integer;
   param: OMX_PARAM_PORTDEFINITIONTYPE;
@@ -343,22 +326,14 @@ var
   hdr: POMX_BUFFERHEADERTYPE;
 begin
   Log('Start of Audio Playback ...');
-
   if not (Channels in [1 .. 2]) then
     exit;
-
-  if AudioHandle <> INVALID_HANDLE_VALUE then
+  if AudioStream = nil then
+    exit;
+  if AudioStream.Size = 0 then
     exit;
 
-  if AudioSize = 0 then
-    exit;
-
-  AudioHandle := FileOpen(AFilename, fmOpenRead or fmShareDenyNone);
-  if AudioHandle = INVALID_HANDLE_VALUE then
-    Exit;
-  FileSeek(AudioHandle, AudioStart, soFromBeginning);
-  AudioOffset := AudioStart;
-
+  AudioStream.Seek(0, soFromBeginning);
   SetLength(comps, 2);
   client := nil;
   eos := False;
@@ -426,7 +401,7 @@ begin
     FillChar(dest.sName, sizeof(dest.sName), 0);
     dest.sName := ADestination;
     OMXCheck('Set Dest', OMX_SetConfig(ilclient_get_handle(comps[0]), OMX_IndexConfigBrcmAudioDestination, @dest));
-    while AudioOffset < AudioSize do
+    while AudioStream.Position < AudioStream.Size do
     begin
       hdr := ilclient_get_input_buffer(comps[0], 100, 1);
       if hdr <> nil then
@@ -442,9 +417,6 @@ begin
     client := nil;
     OMX_DeInit;
   end;
-
-  FileClose(AudioHandle);
-  AudioHandle := INVALID_HANDLE_VALUE;
 
   Log('End of Audio Playback ...');
 end;
@@ -479,7 +451,7 @@ begin
   FillChar(tunnel, SizeOf(tunnel), 0);
 
   // Open file
-  infile := FileOpen(AFilename, fmOpenRead or fmShareDenyNone);
+  infile := FileOpen(AFilename, fmOpenReadWrite or fmShareDenyNone);
   if infile = INVALID_HANDLE_VALUE then
     Exit(-2);
 
