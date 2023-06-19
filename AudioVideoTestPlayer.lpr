@@ -1,4 +1,4 @@
-program AudioVideoTest;
+program AudioVideoTestPlayer;
 
 {$mode delphi}{$H+}
 {$hints off}
@@ -64,23 +64,39 @@ var
   HTTPListener: THTTPListener;
 
 type
+  TOnNextFile = function(var AFilename: String): Boolean;
+
+  TVideoThread = class;
+
   // Audio and Video thread classes
   TAudioThread = class(TThread)
   private
     FFilename: String;
     FRepeat: Boolean;
+
+    FOnNextFile: TOnNextFile;
+    FVideoThread: TVideoThread;
   public
     constructor Create(const AFilename: String; ARepeat: Boolean);
     procedure Execute; override;
+
+    property OnNextFile: TOnNextFile read FOnNextFile write FOnNextFile;
+    property VideoThread: TVideoThread read FVideoThread write FVideoThread;
   end;
 
   TVideoThread = class(TThread)
   private
     FFilename: String;
     FRepeat: Boolean;
+
+    FOnNextFile: TOnNextFile;
+    FAudioThread: TAudioThread;
   public
     constructor Create(const AFilename: String; ARepeat: Boolean);
     procedure Execute; override;
+
+    property OnNextFile: TOnNextFile read FOnNextFile write FOnNextFile;
+    property AudioThread: TAudioThread read FAudioThread write FAudioThread;
   end;
 
 // Forward declarations for thread classes
@@ -100,11 +116,32 @@ begin
 end;
 
 procedure TAudioThread.Execute;
+var
+  Message: TMessage;
 begin
   ThreadSetName(ThreadGetCurrent, 'Audio Thread');
 
-  // Play audio file
-  PlayFile('hdmi', FFilename, FRepeat);
+  FillChar(Message, SizeOf(TMessage), 0);
+
+  while not Terminated do
+  begin
+    // Play audio file
+    PlayFile('hdmi', FFilename, FRepeat);
+
+    if not(FRepeat) and (not Assigned(FOnNextFile) or not FOnNextFile(FFilename)) then
+      Break;
+
+    // Open audio file
+    OpenFile(FFilename);
+
+    // Wait for signal from Video Thread
+    if Assigned(VideoThread) and (ThreadReceiveMessage(Message) <> ERROR_SUCCESS) then
+      Break;
+
+    // Send signal to Video Thread
+    if Assigned(VideoThread) then
+      ThreadSendMessage(VideoThread.ThreadId, Message);
+  end;
 end;
 
 constructor TVideoThread.Create(const AFilename: String; ARepeat: Boolean);
@@ -119,16 +156,39 @@ begin
 end;
 
 procedure TVideoThread.Execute;
+var
+  Message: TMessage;
 begin
   ThreadSetName(ThreadGetCurrent, 'Video Thread');
 
-  // Play video file
-  PlayVideo(FFilename, FRepeat);
+  FillChar(Message, SizeOf(TMessage), 0);
+
+  while not Terminated do
+  begin
+    // Play video file
+    PlayVideo(FFilename, FRepeat);
+
+    if not(FRepeat) and (not Assigned(FOnNextFile) or not FOnNextFile(FFilename)) then
+      Break;
+
+    // Send signal to Audio Thread
+    if Assigned(AudioThread) then
+      ThreadSendMessage(AudioThread.ThreadId, Message);
+
+    // Wait for signal from Audio Thread
+    if Assigned(AudioThread) and (ThreadReceiveMessage(Message) <> ERROR_SUCCESS) then
+      Break;
+  end;
 end;
 
 var
   AudioThread: TAudioThread;
   VideoThread: TVideoThread;
+
+  AudioIndex: Integer;
+  VideoIndex: Integer;
+  AudioFiles: TStringList;
+  VideoFiles: TStringList;
 
 // General routines
 procedure Log1(s: string);
@@ -647,6 +707,30 @@ begin
   Log('End of Video Playback ...');
 end;
 
+
+function NextAudioFile(var AFilename: String): Boolean;
+begin
+  Inc(AudioIndex);
+
+  if AudioIndex > AudioFiles.Count - 1 then
+    AudioIndex := 0;
+
+  AFilename := AudioFiles.Strings[AudioIndex];
+  Result := True;
+end;
+
+function NextVideoFile(var AFilename: String): Boolean;
+begin
+  Inc(VideoIndex);
+
+  if VideoIndex > VideoFiles.Count - 1 then
+    VideoIndex := 0;
+
+  AFilename := VideoFiles.Strings[VideoIndex];
+  Result := True;
+end;
+
+
 begin
   HTTPListener := THTTPListener.Create;
   HTTPListener.Active := True;
@@ -667,9 +751,27 @@ begin
   // Init BCM Host
   BCMHostInit;
 
+  // Create Audio and Video file lists
+  AudioIndex := 0;
+  VideoIndex := 0;
+  AudioFiles := TStringList.Create;
+  VideoFiles := TStringList.Create;
+
+  // Load Audio and Video file lists
+  AudioFiles.Add('C:\Audio1.wav');
+  AudioFiles.Add('C:\Audio2.wav');
+  AudioFiles.Add('C:\Audio3.wav');
+  VideoFiles.Add('C:\Video1.h264');
+  VideoFiles.Add('C:\Video2.h264');
+  VideoFiles.Add('C:\Video3.h264');
+
   // Create Audio and Video threads
-  AudioThread := TAudioThread.Create('c:\a2002011001-e02.wav', True);
-  VideoThread := TVideoThread.Create('C:\test.h264', True);
+  AudioThread := TAudioThread.Create(AudioFiles.Strings[AudioIndex], False);
+  VideoThread := TVideoThread.Create(VideoFiles.Strings[VideoIndex], False);
+  AudioThread.OnNextFile := NextAudioFile;
+  AudioThread.VideoThread := VideoThread;
+  VideoThread.OnNextFile := NextVideoFile;
+  VideoThread.AudioThread := AudioThread;
 
   // Start audio thread (Video thread starts immediately)
   AudioThread.Start;
