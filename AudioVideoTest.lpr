@@ -633,10 +633,10 @@ begin
   ilclient_disable_port_buffers(video_decode, 130, nil, nil, nil);
   ilclient_teardown_tunnels(@tunnel[0]);
 
-  ilclient_state_transition(list[0], OMX_StateIdle);
-  ilclient_state_transition(list[0], OMX_StateLoaded);
+  ilclient_state_transition(@list[0], OMX_StateIdle);
+  ilclient_state_transition(@list[0], OMX_StateLoaded);
 
-  ilclient_cleanup_components(list[0]);
+  ilclient_cleanup_components(@list[0]);
 
   OMX_Deinit;
 
@@ -668,7 +668,7 @@ begin
   BCMHostInit;
 
   // Create Audio and Video threads
-  AudioThread := TAudioThread.Create('c:\Green Day - 21 Guns [Official Music Video]-[r00ikilDxW4].wav', True); //c:\a2002011001-e02.wav
+  AudioThread := TAudioThread.Create('c:\a2002011001-e02.wav', True);
   VideoThread := TVideoThread.Create('C:\test.h264', True);
 
   // Start audio thread (Video thread starts immediately)
